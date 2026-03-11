@@ -36,13 +36,13 @@ run_test "auth status --pretty returns JSON" \
   "node dist/bin/linkedin.js auth status --pretty"
 
 run_test "--help exits 0" \
-  "node dist/bin/linkedin.js --help && echo '{\"success\":true}'"
+  "node dist/bin/linkedin.js --help > /dev/null 2>&1 && echo '{\"success\":true}'"
 
 run_test "auth status has 'authenticated' field" \
   "node dist/bin/linkedin.js auth status | python3 -c \"import sys,json; d=json.load(sys.stdin); assert 'authenticated' in d.get('data',{}); print(json.dumps({'success':True}))\""
 
 run_test "messages list returns JSON when not authed" \
-  "node dist/bin/linkedin.js messages list 2>&1 || node dist/bin/linkedin.js messages list; echo '{\"success\":true}'"
+  "node dist/bin/linkedin.js messages list 2>&1 | head -1"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

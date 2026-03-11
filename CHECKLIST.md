@@ -30,8 +30,8 @@ Live progress tracker. Updated as each task completes.
 - [x] P4-T2 — Post: comment on post
 
 ## Phase 5 — Polish
-- [ ] P5-T1 — Caching layer
-- [ ] P5-T2 — Security hardening
-- [ ] P5-T3 — Stdin utility (pipe support)
-- [ ] P5-T4 — Debug logging
-- [ ] P5-T5 — Smoke test script
+- [x] P5-T1 — Caching layer
+- [x] P5-T2 — Security hardening
+- [x] P5-T3 — Stdin utility (pipe support)
+- [x] P5-T4 — Debug logging
+- [x] P5-T5 — Smoke test script
