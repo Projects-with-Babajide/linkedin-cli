@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:developer.linkedin.com)",
+      "WebFetch(domain:www.linkedin.com)",
+      "Bash(npx tsc:*)",
+      "Bash(gh org:*)",
+      "Bash(git init:*)",
+      "Bash(git branch:*)",
+      "Bash(git -C /Users/babajideokusanya/Documents/Projects-with-Babajide/linkedin-cli status)",
+      "Bash(npm run:*)",
+      "Bash(node dist/bin/linkedin.js --help 2>&1)",
+      "Bash(node dist/bin/linkedin.js auth status 2>&1)",
+      "Bash(git add:*)"
+    ]
+  }
+}

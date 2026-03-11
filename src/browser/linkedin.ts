@@ -1,6 +1,7 @@
 import { createBrowserSession, closeBrowserSession } from './session';
 import { randomDelay, safeClick, checkForBlock, ensureLoggedIn } from './helpers';
 import { CliException, ErrorCode } from '../utils/errors';
+import { getCached, setCached } from '../storage/cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -242,6 +243,10 @@ export interface FeedPost {
 }
 
 export async function scrapeFeed(limit: number): Promise<FeedPost[]> {
+  const cacheKey = `feed-${limit}`;
+  const cached = await getCached<FeedPost[]>(cacheKey, 5 * 60 * 1000);
+  if (cached) return cached;
+
   const session = await createBrowserSession();
   try {
     await ensureLoggedIn(session.page);
@@ -326,6 +331,7 @@ export async function scrapeFeed(limit: number): Promise<FeedPost[]> {
       }
     }
 
+    await setCached(cacheKey, posts.slice(0, limit));
     return posts.slice(0, limit);
   } finally {
     await closeBrowserSession(session);
@@ -342,6 +348,10 @@ export interface SearchPost {
 }
 
 export async function searchPosts(query: string, limit: number): Promise<SearchPost[]> {
+  const cacheKey = `search-posts-${query}-${limit}`;
+  const cached = await getCached<SearchPost[]>(cacheKey, 10 * 60 * 1000);
+  if (cached) return cached;
+
   const session = await createBrowserSession();
   try {
     await ensureLoggedIn(session.page);
@@ -386,6 +396,7 @@ export async function searchPosts(query: string, limit: number): Promise<SearchP
       }).filter((r) => r.author || r.body);
     });
 
+    await setCached(cacheKey, results.slice(0, limit));
     return results.slice(0, limit);
   } finally {
     await closeBrowserSession(session);
@@ -400,6 +411,10 @@ export interface PersonResult {
 }
 
 export async function searchPeople(query: string, limit: number): Promise<PersonResult[]> {
+  const cacheKey = `search-people-${query}-${limit}`;
+  const cached = await getCached<PersonResult[]>(cacheKey, 10 * 60 * 1000);
+  if (cached) return cached;
+
   const session = await createBrowserSession();
   try {
     await ensureLoggedIn(session.page);
@@ -445,6 +460,7 @@ export async function searchPeople(query: string, limit: number): Promise<Person
       }).filter((r) => r.name);
     });
 
+    await setCached(cacheKey, results.slice(0, limit));
     return results.slice(0, limit);
   } finally {
     await closeBrowserSession(session);
@@ -459,6 +475,10 @@ export interface CompanyResult {
 }
 
 export async function searchCompanies(query: string, limit: number): Promise<CompanyResult[]> {
+  const cacheKey = `search-companies-${query}-${limit}`;
+  const cached = await getCached<CompanyResult[]>(cacheKey, 10 * 60 * 1000);
+  if (cached) return cached;
+
   const session = await createBrowserSession();
   try {
     await ensureLoggedIn(session.page);
@@ -504,6 +524,7 @@ export async function searchCompanies(query: string, limit: number): Promise<Com
       }).filter((r) => r.name);
     });
 
+    await setCached(cacheKey, results.slice(0, limit));
     return results.slice(0, limit);
   } finally {
     await closeBrowserSession(session);

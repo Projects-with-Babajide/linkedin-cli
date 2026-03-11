@@ -1,6 +1,7 @@
 import { AuthTokens } from '../types/index';
 import { CliException, ErrorCode } from '../utils/errors';
 import { loadTokens } from '../storage/keytar-store';
+import { debug } from '../utils/logger';
 
 export async function requireValidTokens(): Promise<AuthTokens> {
   const tokens = await loadTokens();
@@ -14,12 +15,14 @@ export async function requireValidTokens(): Promise<AuthTokens> {
 }
 
 export async function apiGet<T>(url: string, tokens: AuthTokens): Promise<T> {
+  debug('apiGet:', url);
   const res = await fetch(url, {
     headers: {
       'Authorization': `Bearer ${tokens.accessToken}`,
       'LinkedIn-Version': '202501',
     },
   });
+  debug('apiGet response:', res.status);
   if (!res.ok) {
     const body = await res.text();
     throw new CliException(

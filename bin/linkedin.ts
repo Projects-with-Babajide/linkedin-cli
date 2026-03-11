@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { setContext } from '../src/utils/context';
+import { checkNotRoot } from '../src/utils/security';
 import { registerAuthCommands } from '../src/commands/auth';
 import { registerProfileCommand } from '../src/commands/profile';
 import { registerMessagesCommands } from '../src/commands/messages';
@@ -7,11 +8,7 @@ import { registerFeedCommand } from '../src/commands/feed';
 import { registerSearchCommands } from '../src/commands/search';
 import { registerPostCommands } from '../src/commands/post';
 
-// Root guard
-if (process.platform !== 'win32' && process.getuid?.() === 0) {
-  process.stderr.write(JSON.stringify({ success: false, error: { code: 'CONFIG_ERROR', message: 'Refusing to run as root' } }) + '\n');
-  process.exit(1);
-}
+checkNotRoot();
 
 const program = new Command();
 

@@ -3,13 +3,7 @@ import { requireValidTokens } from '../api/client';
 import { createTextPost, commentOnPost } from '../api/posts';
 import { outputJson, handleCommandError } from '../utils/output';
 import { getContext } from '../utils/context';
-
-async function readStdin(): Promise<string> {
-  if (process.stdin.isTTY) return '';
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-  return Buffer.concat(chunks).toString('utf-8').trim();
-}
+import { readStdin } from '../utils/stdin';
 
 export function registerPostCommands(program: Command): void {
   const post = program.command('post').description('Create and interact with LinkedIn posts');
