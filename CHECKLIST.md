@@ -5,12 +5,12 @@ Live progress tracker. Updated as each task completes.
 ---
 
 ## Phase 1 — Auth + Profile (Foundation)
-- [ ] P1-T1 — Project scaffold (package.json, tsconfig, bin/linkedin.ts, src/types/index.ts)
-- [ ] P1-T2 — Output helpers and error handling (output.ts, errors.ts)
-- [ ] P1-T3 — Storage layer (keytar wrapper, config.ts)
-- [ ] P1-T4 — Auth command: OAuth flow (oauth.ts, commands/auth.ts)
-- [ ] P1-T5 — Global flags middleware (context.ts)
-- [ ] P1-T6 — Profile command via official API (api/client.ts, commands/profile.ts)
+- [x] P1-T1 — Project scaffold (package.json, tsconfig, bin/linkedin.ts, src/types/index.ts)
+- [x] P1-T2 — Output helpers and error handling (output.ts, errors.ts)
+- [x] P1-T3 — Storage layer (keytar wrapper, config.ts)
+- [x] P1-T4 — Auth command: OAuth flow (oauth.ts, commands/auth.ts)
+- [x] P1-T5 — Global flags middleware (context.ts)
+- [x] P1-T6 — Profile command via official API (api/client.ts, commands/profile.ts)
 
 ## Phase 2 — Messages
 - [ ] P2-T1 — Browser session manager (browser/session.ts)
