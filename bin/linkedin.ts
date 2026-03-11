@@ -2,6 +2,10 @@ import { Command } from 'commander';
 import { setContext } from '../src/utils/context';
 import { registerAuthCommands } from '../src/commands/auth';
 import { registerProfileCommand } from '../src/commands/profile';
+import { registerMessagesCommands } from '../src/commands/messages';
+import { registerFeedCommand } from '../src/commands/feed';
+import { registerSearchCommands } from '../src/commands/search';
+import { registerPostCommands } from '../src/commands/post';
 
 // Root guard
 if (process.platform !== 'win32' && process.getuid?.() === 0) {
@@ -37,5 +41,9 @@ program.hook('preAction', (_thisCommand, actionCommand) => {
 
 registerAuthCommands(program);
 registerProfileCommand(program);
+registerMessagesCommands(program);
+registerFeedCommand(program);
+registerSearchCommands(program);
+registerPostCommands(program);
 
 program.parseAsync(process.argv);
