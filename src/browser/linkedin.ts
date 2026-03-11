@@ -1,5 +1,6 @@
 import { createBrowserSession, closeBrowserSession } from './session';
 import { randomDelay, safeClick, checkForBlock, ensureLoggedIn } from './helpers';
+import { CliException, ErrorCode } from '../utils/errors';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -223,6 +224,287 @@ export async function startNewThread(recipientQuery: string, body: string): Prom
     const url = session.page.url();
     const match = url.match(/\/messaging\/thread\/([^/]+)/);
     return match ? match[1] : url;
+  } finally {
+    await closeBrowserSession(session);
+  }
+}
+
+// ─── Feed ─────────────────────────────────────────────────────────────────────
+
+export interface FeedPost {
+  urn: string;
+  author: string;
+  body: string;
+  reactions: number;
+  comments: number;
+  url: string;
+  timestamp: string;
+}
+
+export async function scrapeFeed(limit: number): Promise<FeedPost[]> {
+  const session = await createBrowserSession();
+  try {
+    await ensureLoggedIn(session.page);
+    await session.page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded' });
+    await randomDelay();
+
+    try {
+      await session.page.waitForSelector(
+        '.feed-shared-update-v2, .occludable-update, [data-urn]',
+        { timeout: 15000 }
+      );
+    } catch {
+      throw new CliException('Feed did not load in time', ErrorCode.NETWORK_ERROR);
+    }
+
+    await checkForBlock(session.page);
+
+    const posts: FeedPost[] = [];
+    let scrolls = 0;
+
+    while (posts.length < limit && scrolls < 5) {
+      const batch = await session.page.evaluate(() => {
+        const results: Array<{
+          urn: string;
+          author: string;
+          body: string;
+          reactions: number;
+          comments: number;
+          url: string;
+          timestamp: string;
+        }> = [];
+
+        const items = document.querySelectorAll(
+          '.feed-shared-update-v2[data-urn], [data-urn][class*="occludable"]'
+        );
+
+        items.forEach((item) => {
+          const urn = item.getAttribute('data-urn') ?? '';
+
+          const authorEl = item.querySelector(
+            '.update-components-actor__name, .feed-shared-actor__name, .update-components-actor__title span[aria-hidden="true"]'
+          );
+          const author = authorEl?.textContent?.trim() ?? '';
+
+          const bodyEl = item.querySelector(
+            '.feed-shared-update-v2__description, .update-components-text, .feed-shared-text'
+          );
+          const body = bodyEl?.textContent?.trim() ?? '';
+
+          const reactionsEl = item.querySelector(
+            '.social-details-social-counts__reactions-count, [aria-label*="reaction"]'
+          );
+          const reactions = parseInt(reactionsEl?.textContent?.trim().replace(/,/g, '') ?? '0', 10) || 0;
+
+          const commentsEl = item.querySelector(
+            '.social-details-social-counts__comments, [aria-label*="comment"]'
+          );
+          const comments = parseInt(commentsEl?.textContent?.trim().replace(/,/g, '') ?? '0', 10) || 0;
+
+          const linkEl = item.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement;
+          const url = linkEl?.href ?? '';
+
+          const timeEl = item.querySelector('time');
+          const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
+
+          if (urn || url) results.push({ urn, author, body, reactions, comments, url, timestamp });
+        });
+
+        return results;
+      });
+
+      for (const post of batch) {
+        if (!posts.find((p) => p.urn === post.urn && p.urn !== '')) {
+          posts.push(post);
+        }
+      }
+
+      if (posts.length < limit) {
+        await session.page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+        await randomDelay(1500, 2500);
+        scrolls++;
+      }
+    }
+
+    return posts.slice(0, limit);
+  } finally {
+    await closeBrowserSession(session);
+  }
+}
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+
+export interface SearchPost {
+  urn: string;
+  author: string;
+  body: string;
+  url: string;
+}
+
+export async function searchPosts(query: string, limit: number): Promise<SearchPost[]> {
+  const session = await createBrowserSession();
+  try {
+    await ensureLoggedIn(session.page);
+    await session.page.goto(
+      `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(query)}`,
+      { waitUntil: 'domcontentloaded' }
+    );
+    await randomDelay();
+
+    try {
+      await session.page.waitForSelector(
+        '.search-results__list, .reusable-search__result-container, [data-chameleon-result-urn]',
+        { timeout: 15000 }
+      );
+    } catch {
+      throw new CliException('Search results did not load', ErrorCode.NETWORK_ERROR);
+    }
+
+    await checkForBlock(session.page);
+
+    const results = await session.page.evaluate(() => {
+      const items = document.querySelectorAll(
+        '.reusable-search__result-container, .search-results__list > li, [data-chameleon-result-urn]'
+      );
+      return Array.from(items).map((item) => {
+        const urn = item.getAttribute('data-chameleon-result-urn') ?? '';
+
+        const authorEl = item.querySelector(
+          '.actor-name, .update-components-actor__name, .app-aware-link span[aria-hidden="true"]'
+        );
+        const author = authorEl?.textContent?.trim() ?? '';
+
+        const bodyEl = item.querySelector(
+          '.feed-shared-update-v2__description, .update-components-text span[dir="ltr"]'
+        );
+        const body = bodyEl?.textContent?.trim() ?? '';
+
+        const linkEl = item.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement;
+        const url = linkEl?.href ?? '';
+
+        return { urn, author, body, url };
+      }).filter((r) => r.author || r.body);
+    });
+
+    return results.slice(0, limit);
+  } finally {
+    await closeBrowserSession(session);
+  }
+}
+
+export interface PersonResult {
+  name: string;
+  headline: string;
+  profileUrl: string;
+  connectionDegree: string;
+}
+
+export async function searchPeople(query: string, limit: number): Promise<PersonResult[]> {
+  const session = await createBrowserSession();
+  try {
+    await ensureLoggedIn(session.page);
+    await session.page.goto(
+      `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(query)}`,
+      { waitUntil: 'domcontentloaded' }
+    );
+    await randomDelay();
+
+    try {
+      await session.page.waitForSelector(
+        '.reusable-search__result-container, .search-results__list',
+        { timeout: 15000 }
+      );
+    } catch {
+      throw new CliException('People search did not load', ErrorCode.NETWORK_ERROR);
+    }
+
+    await checkForBlock(session.page);
+
+    const results = await session.page.evaluate(() => {
+      const items = document.querySelectorAll('.reusable-search__result-container, .search-results__list > li');
+      return Array.from(items).map((item) => {
+        const nameEl = item.querySelector(
+          '.entity-result__title-text a span[aria-hidden="true"], .actor-name'
+        );
+        const name = nameEl?.textContent?.trim() ?? '';
+
+        const headlineEl = item.querySelector(
+          '.entity-result__primary-subtitle, .subline-level-1'
+        );
+        const headline = headlineEl?.textContent?.trim() ?? '';
+
+        const linkEl = item.querySelector('a.app-aware-link[href*="/in/"]') as HTMLAnchorElement;
+        const profileUrl = linkEl?.href ?? '';
+
+        const degreeEl = item.querySelector(
+          '.dist-value, .entity-result__badge-text'
+        );
+        const connectionDegree = degreeEl?.textContent?.trim() ?? '';
+
+        return { name, headline, profileUrl, connectionDegree };
+      }).filter((r) => r.name);
+    });
+
+    return results.slice(0, limit);
+  } finally {
+    await closeBrowserSession(session);
+  }
+}
+
+export interface CompanyResult {
+  name: string;
+  industry: string;
+  followerCount: string;
+  profileUrl: string;
+}
+
+export async function searchCompanies(query: string, limit: number): Promise<CompanyResult[]> {
+  const session = await createBrowserSession();
+  try {
+    await ensureLoggedIn(session.page);
+    await session.page.goto(
+      `https://www.linkedin.com/search/results/companies/?keywords=${encodeURIComponent(query)}`,
+      { waitUntil: 'domcontentloaded' }
+    );
+    await randomDelay();
+
+    try {
+      await session.page.waitForSelector(
+        '.reusable-search__result-container, .search-results__list',
+        { timeout: 15000 }
+      );
+    } catch {
+      throw new CliException('Company search did not load', ErrorCode.NETWORK_ERROR);
+    }
+
+    await checkForBlock(session.page);
+
+    const results = await session.page.evaluate(() => {
+      const items = document.querySelectorAll('.reusable-search__result-container, .search-results__list > li');
+      return Array.from(items).map((item) => {
+        const nameEl = item.querySelector(
+          '.entity-result__title-text a span[aria-hidden="true"], .app-aware-link span[aria-hidden="true"]'
+        );
+        const name = nameEl?.textContent?.trim() ?? '';
+
+        const industryEl = item.querySelector(
+          '.entity-result__primary-subtitle'
+        );
+        const industry = industryEl?.textContent?.trim() ?? '';
+
+        const followerEl = item.querySelector(
+          '.entity-result__secondary-subtitle'
+        );
+        const followerCount = followerEl?.textContent?.trim() ?? '';
+
+        const linkEl = item.querySelector('a.app-aware-link[href*="/company/"]') as HTMLAnchorElement;
+        const profileUrl = linkEl?.href ?? '';
+
+        return { name, industry, followerCount, profileUrl };
+      }).filter((r) => r.name);
+    });
+
+    return results.slice(0, limit);
   } finally {
     await closeBrowserSession(session);
   }
