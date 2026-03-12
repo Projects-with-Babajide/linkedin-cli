@@ -10,11 +10,6 @@ const SCOPES = ['openid', 'profile', 'email', 'w_member_social'];
 
 export async function startOAuthFlow(config: CliConfig): Promise<AuthTokens> {
   const state = crypto.randomBytes(16).toString('hex');
-  const codeVerifier = crypto.randomBytes(32).toString('base64url');
-  const codeChallenge = crypto
-    .createHash('sha256')
-    .update(codeVerifier)
-    .digest('base64url');
 
   const port = config.redirectPort || 8765;
   const redirectUri = `http://localhost:${port}/callback`;
@@ -25,8 +20,6 @@ export async function startOAuthFlow(config: CliConfig): Promise<AuthTokens> {
     redirect_uri: redirectUri,
     scope: SCOPES.join(' '),
     state,
-    code_challenge: codeChallenge,
-    code_challenge_method: 'S256',
   });
 
   const authUrl = `${LINKEDIN_AUTH_URL}?${params.toString()}`;
@@ -69,7 +62,6 @@ export async function startOAuthFlow(config: CliConfig): Promise<AuthTokens> {
       redirect_uri: redirectUri,
       client_id: config.clientId,
       client_secret: config.clientSecret,
-      code_verifier: codeVerifier,
     }).toString(),
   });
 
