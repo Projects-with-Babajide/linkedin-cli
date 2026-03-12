@@ -59,7 +59,7 @@ Browser automation for personal, interactive, manually-triggered use is against 
 
 ## File Structure
 ```
-linkedin-cli/
+link-pulse/
   src/
     commands/       # One file per command group
     auth/           # OAuth flow, session management
