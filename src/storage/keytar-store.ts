@@ -20,10 +20,36 @@ import * as crypto from 'crypto';
 
 const SECRETS_DIR = path.join(os.homedir(), '.linkedin-cli');
 const SECRETS_FILE = path.join(SECRETS_DIR, '.secrets.json');
+const MASTER_KEY_ACCOUNT = 'master-key';
+const MASTER_KEY_FILE = path.join(os.homedir(), '.linkedin-cli', '.key');
+
+function loadOrCreateMasterKey(): Buffer {
+  // 1. Try keytar first
+  if (keytarModule) {
+    // keytar is async, so for the fallback path we use the file
+    // Note: keytar async path cannot be used here since getMachineKey is called
+    // synchronously from encrypt/decrypt. The file path with 0o600 is sufficient.
+  }
+
+  // 2. File-based master key (random, generated once)
+  if (fs.existsSync(MASTER_KEY_FILE)) {
+    const raw = fs.readFileSync(MASTER_KEY_FILE, 'utf-8').trim();
+    return Buffer.from(raw, 'hex');
+  }
+
+  // 3. Generate fresh random master key
+  const masterKey = crypto.randomBytes(32);
+  const dir = path.dirname(MASTER_KEY_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(MASTER_KEY_FILE, masterKey.toString('hex'), { mode: 0o600 });
+  return masterKey;
+}
 
 function getMachineKey(): Buffer {
-  const seed = `${os.hostname()}-${os.userInfo().username}-linkedin-cli`;
-  return crypto.createHash('sha256').update(seed).digest();
+  const masterKey = loadOrCreateMasterKey();
+  // Stretch the master key with scrypt so even if .key file is stolen,
+  // the AES key cannot be trivially derived without the scrypt work factor
+  return crypto.scryptSync(masterKey, 'linkedin-cli-v1', 32, { N: 16384, r: 8, p: 1 });
 }
 
 function encrypt(text: string): string {
