@@ -1,8 +1,10 @@
 import * as http from 'http';
 import * as crypto from 'crypto';
-import open from 'open';
+import { chromium } from 'playwright';
 import { AuthTokens, CliConfig } from '../types/index';
 import { CliException, ErrorCode } from '../utils/errors';
+import { saveCookies } from '../storage/keytar-store';
+import { getContext } from '../utils/context';
 
 const LINKEDIN_AUTH_URL = 'https://www.linkedin.com/oauth/v2/authorization';
 const LINKEDIN_TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
@@ -24,7 +26,8 @@ export async function startOAuthFlow(config: CliConfig): Promise<AuthTokens> {
 
   const authUrl = `${LINKEDIN_AUTH_URL}?${params.toString()}`;
 
-  const code = await new Promise<string>((resolve, reject) => {
+  // Start local callback server
+  const codePromise = new Promise<string>((resolve, reject) => {
     const server = http.createServer((req, res) => {
       const reqUrl = new URL(req.url!, `http://localhost:${port}`);
       if (reqUrl.pathname !== '/callback') return;
@@ -44,15 +47,40 @@ export async function startOAuthFlow(config: CliConfig): Promise<AuthTokens> {
       resolve(returnedCode);
     });
 
-    server.listen(port, () => {
-      open(authUrl).catch(() => {
-        process.stderr.write(`Open this URL in your browser:\n${authUrl}\n`);
-      });
-    });
-
+    server.listen(port);
     server.on('error', (err) => reject(err));
   });
 
+  // Use Playwright so we can capture LinkedIn session cookies after login
+  const { headless } = getContext();
+  const browser = await chromium.launch({ headless: false }); // always visible for login
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  await page.goto(authUrl);
+
+  // Wait for user to complete login and be redirected to our callback
+  process.stderr.write('Complete the login in the browser window...\n');
+
+  let code: string;
+  try {
+    code = await codePromise;
+
+    // Wait for the callback page to finish loading, then navigate to feed
+    // so LinkedIn fully establishes the session before we capture cookies
+    process.stderr.write('Saving session — please wait...\n');
+    await page.waitForLoadState('load').catch(() => {/* ignore */});
+    await new Promise((r) => setTimeout(r, 1000));
+    await page.goto('https://www.linkedin.com/feed', { waitUntil: 'load' });
+    await new Promise((r) => setTimeout(r, 3000)); // let session cookies settle
+
+    const storageState = await context.storageState();
+    await saveCookies(JSON.stringify(storageState));
+  } finally {
+    await browser.close();
+  }
+
+  // Exchange code for tokens
   const tokenRes = await fetch(LINKEDIN_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },

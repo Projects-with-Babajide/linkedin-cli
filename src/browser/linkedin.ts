@@ -242,6 +242,63 @@ export interface FeedPost {
   timestamp: string;
 }
 
+/**
+ * For posts without URLs, click the 3-dot menu on each to extract the URN
+ * from the embed/report links that appear in the dropdown.
+ */
+async function resolvePostUrls(page: import('playwright').Page, posts: FeedPost[]): Promise<void> {
+  const items = await page.$$('div[role="listitem"]');
+
+  for (const post of posts) {
+    if (post.url) continue;
+
+    // Find the matching listitem by author name
+    for (const item of items) {
+      const menuBtn = await item.$(`button[aria-label="Open control menu for post by ${post.author}"]`);
+      if (!menuBtn) continue;
+
+      // Check if we already resolved this one (in case of multiple posts by same author)
+      const alreadyHasUrn = !post.urn.startsWith('feed-item-');
+      if (alreadyHasUrn) {
+        post.url = `https://www.linkedin.com/feed/update/${post.urn}/`;
+        break;
+      }
+
+      try {
+        // Click the 3-dot menu via JS to avoid overlay issues
+        await menuBtn.evaluate((b: Element) => (b as HTMLElement).click());
+        await randomDelay(800, 1200);
+
+        // Extract URN from embed/report links in the dropdown
+        const urn = await page.evaluate(() => {
+          const menuLinks = Array.from(document.querySelectorAll('[role="menu"] a[href], [role="menuitem"] a[href], a[role="menuitem"]'));
+          for (const link of menuLinks) {
+            const href = (link as HTMLAnchorElement).href ?? '';
+            const m = href.match(/urn(?:%3A|:)li(?:%3A|:)(\w+)(?:%3A|:)(\d+)/);
+            if (m) {
+              return `urn:li:${m[1]}:${m[2]}`;
+            }
+          }
+          return '';
+        });
+
+        // Close the menu
+        await page.keyboard.press('Escape');
+        await randomDelay(300, 500);
+
+        if (urn) {
+          post.urn = urn;
+          post.url = `https://www.linkedin.com/feed/update/${urn}/`;
+        }
+      } catch {
+        // If menu interaction fails, skip this post
+        try { await page.keyboard.press('Escape'); } catch { /* ignore */ }
+      }
+      break;
+    }
+  }
+}
+
 export async function scrapeFeed(limit: number): Promise<FeedPost[]> {
   const cacheKey = `feed-${limit}`;
   const cached = await getCached<FeedPost[]>(cacheKey, 5 * 60 * 1000);
@@ -250,24 +307,14 @@ export async function scrapeFeed(limit: number): Promise<FeedPost[]> {
   const session = await createBrowserSession();
   try {
     await ensureLoggedIn(session.page);
-    await session.page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded' });
-    await randomDelay();
-
-    try {
-      await session.page.waitForSelector(
-        '.feed-shared-update-v2, .occludable-update, [data-urn]',
-        { timeout: 15000 }
-      );
-    } catch {
-      throw new CliException('Feed did not load in time', ErrorCode.NETWORK_ERROR);
-    }
-
+    await session.page.goto('https://www.linkedin.com/feed/', { waitUntil: 'load' });
+    await randomDelay(3000, 4000); // extra wait for React to render feed posts
     await checkForBlock(session.page);
 
     const posts: FeedPost[] = [];
     let scrolls = 0;
 
-    while (posts.length < limit && scrolls < 5) {
+    while (posts.length < limit && scrolls < 6) {
       const batch = await session.page.evaluate(() => {
         const results: Array<{
           urn: string;
@@ -279,47 +326,137 @@ export async function scrapeFeed(limit: number): Promise<FeedPost[]> {
           timestamp: string;
         }> = [];
 
-        const items = document.querySelectorAll(
-          '.feed-shared-update-v2[data-urn], [data-urn][class*="occludable"]'
-        );
+        // LinkedIn 2025+: feed posts are div[role="listitem"] elements
+        const items = Array.from(document.querySelectorAll('div[role="listitem"]'));
 
         items.forEach((item) => {
-          const urn = item.getAttribute('data-urn') ?? '';
+          // Extract author from the control menu button aria-label
+          // Pattern: "Open control menu for post by <Author Name>"
+          const menuBtn = item.querySelector('button[aria-label^="Open control menu for post by"]');
+          const author = menuBtn?.getAttribute('aria-label')?.replace('Open control menu for post by', '').trim() ?? '';
 
-          const authorEl = item.querySelector(
-            '.update-components-actor__name, .feed-shared-actor__name, .update-components-actor__title span[aria-hidden="true"]'
-          );
-          const author = authorEl?.textContent?.trim() ?? '';
+          // Extract post body — find the longest <p> or <span> that looks like post content
+          // Post body text is in <p> elements; skip short ones (names, labels) and comment text
+          const allTextEls = Array.from(item.querySelectorAll('p, span'));
+          let body = '';
+          let bodyLen = 0;
+          for (const el of allTextEls) {
+            const text = el.textContent?.trim() ?? '';
+            // Skip very short text, reaction/comment counts, and elements inside comment sections
+            if (text.length <= 30) continue;
+            if (/^\d+\s*(reaction|comment|repost)/i.test(text)) continue;
+            // Skip if this element is inside a nested listitem (comment)
+            if (el.closest('div[role="listitem"]') !== item) continue;
+            if (text.length > bodyLen) {
+              body = text;
+              bodyLen = text.length;
+            }
+          }
 
-          const bodyEl = item.querySelector(
-            '.feed-shared-update-v2__description, .update-components-text, .feed-shared-text'
-          );
-          const body = bodyEl?.textContent?.trim() ?? '';
+          // Extract reactions count from link text like "7 reactions7" or "123 reactions"
+          const allLinks = Array.from(item.querySelectorAll('a'));
+          let reactions = 0;
+          let comments = 0;
+          for (const link of allLinks) {
+            const text = link.textContent?.trim() ?? '';
+            const reactMatch = text.match(/^(\d[\d,]*)\s*reaction/i);
+            if (reactMatch) {
+              reactions = parseInt(reactMatch[1].replace(/,/g, ''), 10) || 0;
+            }
+            const commentMatch = text.match(/^(\d[\d,]*)\s*comment/i);
+            if (commentMatch) {
+              comments = parseInt(commentMatch[1].replace(/,/g, ''), 10) || 0;
+            }
+          }
+          // Also check <p> elements for comment counts (e.g. "738 comments738 comments")
+          if (comments === 0) {
+            const allP = Array.from(item.querySelectorAll('p'));
+            for (const p of allP) {
+              const text = p.textContent?.trim() ?? '';
+              const m = text.match(/(\d[\d,]*)\s*comment/i);
+              if (m) {
+                comments = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+                break;
+              }
+            }
+          }
 
-          const reactionsEl = item.querySelector(
-            '.social-details-social-counts__reactions-count, [aria-label*="reaction"]'
-          );
-          const reactions = parseInt(reactionsEl?.textContent?.trim().replace(/,/g, '') ?? '0', 10) || 0;
+          // Extract URN and URL
+          // Strategy 1: direct link to feed/update/urn
+          const postLink = item.querySelector('a[href*="feed/update/urn"]') as HTMLAnchorElement | null;
+          let url = postLink?.href ?? '';
+          let urn = '';
 
-          const commentsEl = item.querySelector(
-            '.social-details-social-counts__comments, [aria-label*="comment"]'
-          );
-          const comments = parseInt(commentsEl?.textContent?.trim().replace(/,/g, '') ?? '0', 10) || 0;
+          if (url) {
+            const urnMatch = url.match(/(urn:li:\w+:\d+)/);
+            urn = urnMatch?.[1] ?? '';
+          }
 
-          const linkEl = item.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement;
-          const url = linkEl?.href ?? '';
+          // Strategy 2: extract activity URN from componentkey attributes
+          if (!urn) {
+            const allEls = Array.from(item.querySelectorAll('[componentkey]'));
+            for (const el of allEls) {
+              const key = el.getAttribute('componentkey') ?? '';
+              const m = key.match(/(urn:li:activity:\d+)/);
+              if (m) {
+                urn = m[1];
+                break;
+              }
+            }
+          }
 
-          const timeEl = item.querySelector('time');
-          const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
+          // Strategy 3: extract from hide button aria-label or other data attributes
+          if (!urn) {
+            const allEls = Array.from(item.querySelectorAll('*'));
+            for (const el of allEls) {
+              for (const attr of Array.from(el.attributes)) {
+                const m = attr.value.match(/(urn:li:(?:activity|ugcPost|share):\d+)/);
+                if (m) {
+                  urn = m[1];
+                  break;
+                }
+              }
+              if (urn) break;
+            }
+          }
 
-          if (urn || url) results.push({ urn, author, body, reactions, comments, url, timestamp });
+          // Construct URL from URN if we don't have one yet
+          if (!url && urn) {
+            url = `https://www.linkedin.com/feed/update/${urn}/`;
+          }
+
+          // Fallback ID if we still have no URN
+          if (!urn) {
+            urn = `feed-item-${Math.random().toString(36).slice(2, 10)}`;
+          }
+
+          // Extract timestamp — look for text like "2w", "3d", "1h" near the author area
+          let timestamp = '';
+          const profileLinks = Array.from(item.querySelectorAll('a[href*="/in/"], a[href*="/company/"]'));
+          for (const link of profileLinks) {
+            const text = link.textContent?.trim() ?? '';
+            const timeMatch = text.match(/(\d+[smhdw])\s*[•·]?\s*$/);
+            if (timeMatch) {
+              timestamp = timeMatch[1];
+              break;
+            }
+          }
+
+          if (author || body) {
+            results.push({ urn, author, body, reactions, comments, url, timestamp });
+          }
         });
 
         return results;
       });
 
       for (const post of batch) {
-        if (!posts.find((p) => p.urn === post.urn && p.urn !== '')) {
+        // Dedup by URN if real, otherwise by author+body prefix
+        const isDupe = posts.some((p) =>
+          (post.urn && !post.urn.startsWith('feed-item-') && p.urn === post.urn) ||
+          (p.author === post.author && p.body.slice(0, 100) === post.body.slice(0, 100))
+        );
+        if (!isDupe) {
           posts.push(post);
         }
       }
@@ -329,6 +466,16 @@ export async function scrapeFeed(limit: number): Promise<FeedPost[]> {
         await randomDelay(1500, 2500);
         scrolls++;
       }
+    }
+
+    if (posts.length === 0) {
+      throw new CliException('No feed posts found — LinkedIn DOM may have changed', ErrorCode.NETWORK_ERROR);
+    }
+
+    // For posts missing URLs, click 3-dot menu to extract URN from embed/report links
+    const postsToResolve = posts.slice(0, limit).filter((p) => !p.url);
+    if (postsToResolve.length > 0) {
+      await resolvePostUrls(session.page, posts.slice(0, limit));
     }
 
     await setCached(cacheKey, posts.slice(0, limit));
@@ -361,43 +508,113 @@ export async function searchPosts(query: string, limit: number): Promise<SearchP
     );
     await randomDelay();
 
-    try {
-      await session.page.waitForSelector(
-        '.search-results__list, .reusable-search__result-container, [data-chameleon-result-urn]',
-        { timeout: 15000 }
-      );
-    } catch {
-      throw new CliException('Search results did not load', ErrorCode.NETWORK_ERROR);
-    }
-
+    // Wait for search results to render — use role="listitem" (LinkedIn 2025+ DOM)
+    await randomDelay(3000, 4000);
     await checkForBlock(session.page);
 
+    // Check if results loaded
+    const hasResults = await session.page.evaluate(() =>
+      document.querySelectorAll('div[role="listitem"]').length > 0
+    );
+    if (!hasResults) {
+      // Try waiting a bit more
+      await randomDelay(3000, 4000);
+    }
+
     const results = await session.page.evaluate(() => {
-      const items = document.querySelectorAll(
-        '.reusable-search__result-container, .search-results__list > li, [data-chameleon-result-urn]'
-      );
-      return Array.from(items).map((item) => {
-        const urn = item.getAttribute('data-chameleon-result-urn') ?? '';
+      const items = Array.from(document.querySelectorAll('div[role="listitem"]'));
 
-        const authorEl = item.querySelector(
-          '.actor-name, .update-components-actor__name, .app-aware-link span[aria-hidden="true"]'
-        );
-        const author = authorEl?.textContent?.trim() ?? '';
+      return items.map((item) => {
+        // Author from control menu button
+        const menuBtn = item.querySelector('button[aria-label^="Open control menu for post by"]');
+        const author = menuBtn?.getAttribute('aria-label')?.replace('Open control menu for post by', '').trim() ?? '';
 
-        const bodyEl = item.querySelector(
-          '.feed-shared-update-v2__description, .update-components-text span[dir="ltr"]'
-        );
-        const body = bodyEl?.textContent?.trim() ?? '';
+        // Body — longest text element
+        const allTextEls = Array.from(item.querySelectorAll('p, span'));
+        let body = '';
+        let bodyLen = 0;
+        for (const el of allTextEls) {
+          const text = el.textContent?.trim() ?? '';
+          if (text.length <= 30) continue;
+          if (/^\d+\s*(reaction|comment|repost)/i.test(text)) continue;
+          if (el.closest('div[role="listitem"]') !== item) continue;
+          if (text.length > bodyLen) {
+            body = text;
+            bodyLen = text.length;
+          }
+        }
 
-        const linkEl = item.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement;
-        const url = linkEl?.href ?? '';
+        // Extract URN and URL
+        const postLink = item.querySelector('a[href*="feed/update/urn"]') as HTMLAnchorElement | null;
+        let url = postLink?.href ?? '';
+        let urn = '';
+
+        if (url) {
+          const m = url.match(/(urn:li:\w+:\d+)/);
+          urn = m?.[1] ?? '';
+        }
+
+        // Fallback: extract URN from componentkey or other attributes
+        if (!urn) {
+          const allEls = Array.from(item.querySelectorAll('*'));
+          for (const el of allEls) {
+            for (const attr of Array.from(el.attributes)) {
+              const m = attr.value.match(/(urn:li:(?:activity|ugcPost|share):\d+)/);
+              if (m) {
+                urn = m[1];
+                break;
+              }
+            }
+            if (urn) break;
+          }
+        }
+
+        // Construct URL from URN if needed
+        if (!url && urn) {
+          url = `https://www.linkedin.com/feed/update/${urn}/`;
+        }
 
         return { urn, author, body, url };
       }).filter((r) => r.author || r.body);
     });
 
-    await setCached(cacheKey, results.slice(0, limit));
-    return results.slice(0, limit);
+    // Resolve URLs for posts that don't have them via 3-dot menu
+    const searchResults = results.slice(0, limit);
+    const needsUrl = searchResults.filter((r) => !r.url);
+    if (needsUrl.length > 0) {
+      const items = await session.page.$$('div[role="listitem"]');
+      for (const result of needsUrl) {
+        for (const item of items) {
+          const menuBtn = await item.$(`button[aria-label="Open control menu for post by ${result.author}"]`);
+          if (!menuBtn) continue;
+          try {
+            await menuBtn.evaluate((b: Element) => (b as HTMLElement).click());
+            await randomDelay(800, 1200);
+            const urn = await session.page.evaluate(() => {
+              const menuLinks = Array.from(document.querySelectorAll('[role="menu"] a[href], [role="menuitem"] a[href], a[role="menuitem"]'));
+              for (const link of menuLinks) {
+                const href = (link as HTMLAnchorElement).href ?? '';
+                const m = href.match(/urn(?:%3A|:)li(?:%3A|:)(\w+)(?:%3A|:)(\d+)/);
+                if (m) return `urn:li:${m[1]}:${m[2]}`;
+              }
+              return '';
+            });
+            await session.page.keyboard.press('Escape');
+            await randomDelay(300, 500);
+            if (urn) {
+              result.urn = urn;
+              result.url = `https://www.linkedin.com/feed/update/${urn}/`;
+            }
+          } catch {
+            try { await session.page.keyboard.press('Escape'); } catch { /* ignore */ }
+          }
+          break;
+        }
+      }
+    }
+
+    await setCached(cacheKey, searchResults);
+    return searchResults;
   } finally {
     await closeBrowserSession(session);
   }
