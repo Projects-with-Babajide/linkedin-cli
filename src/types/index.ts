@@ -2,6 +2,7 @@ export interface CliConfig {
   clientId: string;
   clientSecret: string;
   redirectPort: number;
+  headless?: boolean;
 }
 
 export interface AuthTokens {
