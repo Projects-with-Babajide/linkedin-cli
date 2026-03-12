@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { Command } from 'commander';
 import { setContext } from '../src/utils/context';
 import { checkNotRoot } from '../src/utils/security';
