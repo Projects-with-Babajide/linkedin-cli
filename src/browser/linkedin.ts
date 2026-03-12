@@ -26,71 +26,64 @@ export async function scrapeMessageThreads(limit: number): Promise<MessageThread
   const session = await createBrowserSession();
   try {
     await ensureLoggedIn(session.page);
-    await session.page.goto('https://www.linkedin.com/messaging/', { waitUntil: 'domcontentloaded' });
-    await randomDelay();
+    await session.page.goto('https://www.linkedin.com/messaging/', { waitUntil: 'load' });
+    await randomDelay(3000, 4000);
 
     // Wait for conversation list
     try {
-      await session.page.waitForSelector('.msg-conversations-container__conversations-list', { timeout: 15000 });
+      await session.page.waitForSelector('li.msg-conversation-listitem', { timeout: 15000 });
     } catch {
-      await session.page.waitForSelector('[data-view-name="message-list-item"]', { timeout: 10000 });
+      await checkForBlock(session.page);
+      throw new CliException('Message list did not load', ErrorCode.NETWORK_ERROR);
     }
 
     await checkForBlock(session.page);
 
-    const threads = await session.page.evaluate(() => {
-      const results: Array<{
-        id: string;
-        participantName: string;
-        snippet: string;
-        timestamp: string;
-        unread: boolean;
-      }> = [];
+    // Extract metadata from each conversation list item, then click to get thread ID
+    const items = await session.page.$$('li.msg-conversation-listitem');
+    const threads: MessageThread[] = [];
 
-      // Try multiple selector strategies
-      const items = document.querySelectorAll(
-        '.msg-conversation-listitem, [data-view-name="message-list-item"], .msg-conversations-container__pillar'
-      );
+    for (let i = 0; i < Math.min(items.length, limit); i++) {
+      const meta = await items[i].evaluate((el: Element) => {
+        const nameEl = el.querySelector(
+          '.msg-conversation-listitem__participant-names, .msg-conversation-card__participant-names, h3'
+        );
+        const participantName = nameEl?.textContent?.trim() ?? 'Unknown';
 
-      items.forEach((item) => {
-        try {
-          // Extract thread ID from link href
-          const link = item.querySelector('a[href*="/messaging/thread/"]') as HTMLAnchorElement;
-          const href = link?.href ?? '';
-          const idMatch = href.match(/\/messaging\/thread\/([^/]+)/);
-          const id = idMatch ? idMatch[1] : '';
+        const snippetEl = el.querySelector(
+          '.msg-conversation-card__message-snippet, .msg-conversation-listitem__message-snippet, p'
+        );
+        const snippet = snippetEl?.textContent?.trim() ?? '';
 
-          // Participant name
-          const nameEl = item.querySelector(
-            '.msg-conversation-listitem__participant-names, .msg-conversation-card__participant-names, h3'
-          );
-          const participantName = nameEl?.textContent?.trim() ?? 'Unknown';
+        const timeEl = el.querySelector('time, .msg-conversation-listitem__time-stamp');
+        const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
 
-          // Message snippet
-          const snippetEl = item.querySelector(
-            '.msg-conversation-card__message-snippet, .msg-conversation-listitem__message-snippet, p'
-          );
-          const snippet = snippetEl?.textContent?.trim() ?? '';
+        const unread =
+          el.classList.contains('msg-conversation-listitem--unread') ||
+          !!el.querySelector('.msg-conversation-listitem__unread-count, .notification-badge');
 
-          // Timestamp
-          const timeEl = item.querySelector('time, .msg-conversation-listitem__time-stamp');
-          const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
-
-          // Unread indicator
-          const unread =
-            item.classList.contains('msg-conversation-listitem--unread') ||
-            !!item.querySelector('.msg-conversation-listitem__unread-count, .notification-badge');
-
-          if (id) results.push({ id, participantName, snippet, timestamp, unread });
-        } catch {
-          // skip malformed item
-        }
+        return { participantName, snippet, timestamp, unread };
       });
 
-      return results;
-    });
+      // Click the conversation to navigate to it and capture the thread ID from the URL
+      const link = await items[i].$('.msg-conversation-listitem__link');
+      if (link) {
+        await link.evaluate((el: Element) => (el as HTMLElement).click());
+      } else {
+        await items[i].evaluate((el: Element) => (el as HTMLElement).click());
+      }
+      await randomDelay(800, 1200);
 
-    return threads.slice(0, limit);
+      const url = session.page.url();
+      const idMatch = url.match(/\/messaging\/thread\/([^/]+)/);
+      const id = idMatch ? idMatch[1] : '';
+
+      if (id) {
+        threads.push({ id, ...meta });
+      }
+    }
+
+    return threads;
   } finally {
     await closeBrowserSession(session);
   }
@@ -101,17 +94,19 @@ export async function scrapeThread(threadId: string, limit = 50): Promise<Messag
   try {
     await ensureLoggedIn(session.page);
     await session.page.goto(`https://www.linkedin.com/messaging/thread/${threadId}/`, {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'load',
     });
-    await randomDelay();
+    await randomDelay(2000, 3000);
 
+    // Wait for messages to render
     try {
-      await session.page.waitForSelector('.msg-s-message-list, .msg-s-message-list-content', { timeout: 15000 });
+      await session.page.waitForSelector(
+        '.msg-s-message-list, .msg-s-message-list-content, [class*="msg-s-event"]',
+        { timeout: 15000 }
+      );
     } catch {
-      await session.page.waitForSelector('[data-view-name="message-list"]', { timeout: 10000 });
+      await checkForBlock(session.page);
     }
-
-    await checkForBlock(session.page);
 
     const messages = await session.page.evaluate(() => {
       const results: Array<{
@@ -121,32 +116,100 @@ export async function scrapeThread(threadId: string, limit = 50): Promise<Messag
         isMe: boolean;
       }> = [];
 
-      const groups = document.querySelectorAll('.msg-s-message-group, [data-view-name="message-group"]');
+      // Strategy 1: msg-s-message-group (classic LinkedIn messaging DOM)
+      const groups = document.querySelectorAll('.msg-s-message-group');
+      if (groups.length > 0) {
+        groups.forEach((group) => {
+          const isMe =
+            group.classList.contains('msg-s-message-group--outgoing') ||
+            !!group.querySelector('[class*="outgoing"]');
 
-      groups.forEach((group) => {
-        const isMe =
-          group.classList.contains('msg-s-message-group--outgoing') ||
-          !!group.querySelector('.msg-s-message-group__meta--outgoing');
+          const senderEl = group.querySelector('.msg-s-message-group__name span');
+          const sender = senderEl?.textContent?.trim() ?? (isMe ? 'You' : 'Unknown');
 
-        const senderEl = group.querySelector('.msg-s-message-group__name, .msg-s-message-group__meta span');
-        const sender = senderEl?.textContent?.trim() ?? (isMe ? 'You' : 'Unknown');
+          const msgItems = group.querySelectorAll('.msg-s-event-listitem');
+          msgItems.forEach((item) => {
+            const bodyEl = item.querySelector('.msg-s-event-listitem__body');
+            const body = bodyEl?.textContent?.trim() ?? '';
 
-        const msgItems = group.querySelectorAll('.msg-s-event-listitem, [data-view-name="message-list-item"]');
-        msgItems.forEach((item) => {
-          const bodyEl = item.querySelector('.msg-s-event-listitem__body, .msg-s-message-group__content p');
-          const body = bodyEl?.textContent?.trim() ?? '';
+            const timeEl = item.querySelector('time');
+            const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
 
-          const timeEl = item.querySelector('time');
-          const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
-
-          if (body) results.push({ sender, body, timestamp, isMe });
+            if (body) results.push({ sender, body, timestamp, isMe });
+          });
         });
+        return results;
+      }
+
+      // Strategy 2: parse the accessible structure
+      // Messages have a pattern: "[Name] sent the following message(s) at [time]"
+      // followed by the actual message content
+      const allEvents = document.querySelectorAll('[class*="msg-s-event"], li[class*="msg-s"]');
+      if (allEvents.length > 0) {
+        allEvents.forEach((event) => {
+          const srText = event.querySelector('.visually-hidden, [class*="visually-hidden"]');
+          const srContent = srText?.textContent?.trim() ?? '';
+
+          // Parse "Name sent the following message(s) at Time"
+          const headerMatch = srContent.match(/^(.+?)\s+sent the following message/);
+          if (headerMatch) {
+            const sender = headerMatch[1];
+            const timeMatch = srContent.match(/at\s+(.+)$/);
+            const timestamp = timeMatch?.[1] ?? '';
+
+            // Find message body — the main text content excluding UI elements
+            const bodyEl = event.querySelector('.msg-s-event-listitem__body, p[class*="message"]');
+            if (bodyEl) {
+              const body = bodyEl.textContent?.trim() ?? '';
+              if (body) {
+                const isMe = sender === 'You' || sender.includes('Babajide');
+                results.push({ sender, body, timestamp, isMe });
+              }
+            }
+          }
+        });
+        return results;
+      }
+
+      // Strategy 3: broad fallback — look for message containers with profile links
+      // Parse blocks that have "View [Name]'s profile" and extract subsequent text
+      const messageBlocks = document.querySelectorAll('[class*="message-event"], [class*="msg-s-message-list"] > *');
+      let currentSender = 'Unknown';
+      let currentTime = '';
+      let currentIsMe = false;
+
+      messageBlocks.forEach((block) => {
+        // Check for sender header
+        const profileLink = block.querySelector('a[class*="profile"]');
+        if (profileLink) {
+          const nameEl = block.querySelector('h4, h3, [class*="name"]');
+          currentSender = nameEl?.textContent?.trim() ?? 'Unknown';
+          const timeEl = block.querySelector('time');
+          currentTime = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
+          currentIsMe = !!block.querySelector('[class*="outgoing"]');
+        }
+
+        // Check for message body
+        const bodyEl = block.querySelector('p[class*="body"], [class*="event-listitem__body"]');
+        const body = bodyEl?.textContent?.trim() ?? '';
+        if (body && body.length > 0) {
+          results.push({ sender: currentSender, body, timestamp: currentTime, isMe: currentIsMe });
+        }
       });
 
       return results;
     });
 
-    return messages.slice(-limit);
+    // Deduplicate (LinkedIn sometimes renders messages multiple times)
+    const seen = new Set<string>();
+    const deduped = messages.filter((m) => {
+      const key = `${m.sender}:${m.body}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return deduped.slice(-limit);
   } finally {
     await closeBrowserSession(session);
   }
@@ -157,12 +220,12 @@ export async function sendMessage(threadId: string, body: string): Promise<void>
   try {
     await ensureLoggedIn(session.page);
     await session.page.goto(`https://www.linkedin.com/messaging/thread/${threadId}/`, {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'load',
     });
-    await randomDelay();
+    await randomDelay(2000, 3000);
 
     const composeSelector =
-      '.msg-form__contenteditable, [data-placeholder="Write a message…"], [aria-label="Write a message"]';
+      '.msg-form__contenteditable, [aria-label="Write a message…"], [role="textbox"]';
     await safeClick(session.page, composeSelector);
     await randomDelay(300, 600);
 
@@ -172,8 +235,19 @@ export async function sendMessage(threadId: string, body: string): Promise<void>
 
     await randomDelay(500, 1000);
 
-    const sendSelector = '.msg-form__send-button, button[type="submit"][aria-label*="Send"]';
-    await safeClick(session.page, sendSelector);
+    // LinkedIn messaging uses Enter to send (shown as "Press Enter to Send")
+    // Try clicking a send button first, fall back to Enter
+    try {
+      const sendBtn = await session.page.$('.msg-form__send-button, button[type="submit"][aria-label*="Send"]');
+      if (sendBtn) {
+        await sendBtn.click();
+      } else {
+        await session.page.keyboard.press('Enter');
+      }
+    } catch {
+      await session.page.keyboard.press('Enter');
+    }
+
     await randomDelay(1000, 2000);
   } finally {
     await closeBrowserSession(session);

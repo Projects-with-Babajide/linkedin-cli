@@ -15,9 +15,9 @@ checkNotRoot();
 const program = new Command();
 
 program
-  .name('linkedin')
+  .name('link-pulse')
   .version('0.1.0')
-  .description('Personal LinkedIn CLI')
+  .description('Feel the pulse of your professional network')
   .option('--pretty', 'Human-readable formatted output', false)
   .option('--json', 'Force JSON output (default)', false)
   .option('--debug', 'Verbose debug logging', false)

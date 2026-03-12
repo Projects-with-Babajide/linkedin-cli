@@ -1,33 +1,36 @@
-# LinkedIn CLI
+# link-pulse
 
-A personal LinkedIn CLI tool that authenticates as you and exposes commands for common LinkedIn workflows — reading your feed, searching posts/people, messaging, and posting. Designed to be invoked by Claude Code as an AI agent.
+A personal CLI for managing your LinkedIn from the terminal — check your feed, search posts, read and send messages, and publish updates. Built to work with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an AI-powered workflow.
 
-## Prerequisites
-
-- **Node.js** v18+
-- **npm**
-- A config file provided to you (see [Setup](#setup))
-
-## Setup
-
-### 1. Clone and install
+## Install
 
 ```bash
-git clone <repo-url>
-cd linkedin-cli
-npm install
+npm install -g link-pulse
+```
+
+Chromium will be installed automatically. If it doesn't, run:
+
+```bash
 npx playwright install chromium
 ```
 
-### 2. Create the config directory
+### Platform Notes
+
+- **macOS**: Works out of the box. `keytar` may prompt for Keychain access — click "Allow".
+- **Linux**: Requires `libsecret-1-dev` and build tools (`sudo apt install libsecret-1-dev build-essential`).
+- **Windows**: Requires [windows-build-tools](https://github.com/nicedoc/windows-build-tools).
+
+## Setup
+
+### 1. Create the config directory
 
 ```bash
 mkdir -p ~/.linkedin-cli
 ```
 
-### 3. Add your config
+### 2. Add your config
 
-You should have received a `config.json` file. Place it at:
+You should have received a `config.json` file containing your OAuth app credentials. Place it at:
 
 ```
 ~/.linkedin-cli/config.json
@@ -44,20 +47,20 @@ The file looks like this:
 }
 ```
 
-> **Do not share this file or commit it to any repo.** It contains OAuth credentials for the LinkedIn app.
+> **Do not share this file or commit it to any repo.** It contains OAuth credentials.
 
-### 4. Authenticate
+### 3. Authenticate
 
 ```bash
-npx ts-node bin/linkedin.ts auth login
+link-pulse auth login
 ```
 
-A browser window will open. Log in with your LinkedIn account and authorize the app. Once complete, your session is saved locally in your OS keychain.
+A browser window will open. Log in and authorize the app. Your session is saved securely in your OS keychain.
 
 To verify:
 
 ```bash
-npx ts-node bin/linkedin.ts auth status
+link-pulse auth status
 ```
 
 ## Usage
@@ -67,45 +70,45 @@ All commands output JSON by default. Add `--pretty` for human-readable output.
 ### Auth
 
 ```bash
-linkedin auth login       # Authenticate with LinkedIn
-linkedin auth status      # Check current auth state
-linkedin auth logout      # Clear stored session
+link-pulse auth login       # Authenticate
+link-pulse auth status      # Check current auth state
+link-pulse auth logout      # Clear stored session
 ```
 
 ### Feed
 
 ```bash
-linkedin feed                  # Read your home feed
-linkedin feed --limit 5        # Limit number of posts
+link-pulse feed                  # Read your home feed
+link-pulse feed --limit 5        # Limit number of posts
 ```
 
 ### Search
 
 ```bash
-linkedin search posts "AI agents"          # Search posts
-linkedin search people "Jane Doe"          # Search people
-linkedin search posts "AI" --limit 10      # With limit
+link-pulse search posts "AI agents"          # Search posts
+link-pulse search people "Jane Doe"          # Search people
+link-pulse search posts "AI" --limit 10      # With limit
 ```
 
 ### Messages
 
 ```bash
-linkedin messages list                     # List recent conversations
-linkedin messages read <conversation-id>   # Read a thread
-linkedin messages send <conversation-id> "Hello!"  # Send a message
+link-pulse messages list                                      # List recent conversations
+link-pulse messages read <conversation-id>                    # Read a thread
+link-pulse messages send <conversation-id> --message "Hello!" # Send a message
 ```
 
 ### Post
 
 ```bash
-linkedin post create "My post text here"          # Create a post
-linkedin post comment <post-urn> "Great post!"    # Comment on a post
+link-pulse post create --text "My post text here"          # Create a post
+link-pulse post comment <post-urn> --text "Great post!"    # Comment on a post
 ```
 
 ### Profile
 
 ```bash
-linkedin profile           # Show your cached profile
+link-pulse profile           # Show your cached profile
 ```
 
 ### Global Options
@@ -121,71 +124,49 @@ linkedin profile           # Show your cached profile
 
 ## How It Works
 
-- **Auth** uses LinkedIn's official OAuth 2.0 flow to establish a session
-- **Posting and commenting** use the official LinkedIn REST API
-- **Feed, search, and messages** use Playwright browser automation with your stored session cookies
-- Session tokens and cookies are stored in your OS keychain (via `keytar`) — not in plaintext files
+- **Auth** uses OAuth 2.0 to establish a session
+- **Posting and commenting** use the official REST API
+- **Feed, search, and messages** use Playwright to interact with the platform on your behalf
+- Credentials are stored in your OS keychain (via `keytar`) — not in plaintext files
 
 ## Using with Claude Code
 
-This CLI is designed to be used as a tool by [Claude Code](https://docs.anthropic.com/en/docs/claude-code). All commands output structured JSON by default, making it easy for Claude to parse and act on the results.
+This CLI outputs structured JSON, making it a natural fit for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Once authenticated, you can give Claude instructions like:
 
-### Setup
-
-1. Complete the [Setup](#setup) steps above and make sure `auth login` works
-2. Open Claude Code in the `linkedin-cli` directory (or any project that has access to it)
-3. Claude can now run CLI commands on your behalf
-
-### What you can ask Claude to do
-
-Once authenticated, you can give Claude natural language instructions like:
-
-- "Check my LinkedIn feed"
+- "Check my feed"
 - "Search for posts about AI in Waterloo"
 - "Read my latest messages"
 - "Post an update about [topic]"
 - "Find people working on [topic]"
-- "What are people saying about [topic] on LinkedIn?"
 
-Claude will invoke the appropriate CLI commands, parse the JSON output, and present the results in a readable format.
-
-### How it works with Claude
-
-Claude runs commands like `npx ts-node bin/linkedin.ts feed --limit 10` behind the scenes. The JSON output lets Claude:
-
-- Summarize your feed or search results
-- Extract key themes from conversations
-- Draft posts or comments based on context
-- Follow up on specific threads or messages
+Claude runs `link-pulse` commands behind the scenes, parses the JSON, and presents readable results.
 
 ### Tips
 
-- Add the project path to your Claude Code workspace so it can access the CLI
-- You can add instructions to your `CLAUDE.md` to tell Claude how you want it to use LinkedIn (e.g., "always summarize my feed in bullet points", "check messages every morning")
-- The `--headless` flag is set by default in the config so browser automation runs in the background without interrupting you
+- Install the [slash command skills](https://github.com/Projects-with-Babajide/the-skill-vault) for `/linkedin-feed`, `/linkedin-search`, `/linkedin-messages`, `/linkedin-post`
+- Add instructions to your `CLAUDE.md` to customize how Claude uses link-pulse
+- The `--headless` flag runs browser interactions in the background
+
+## Disclaimer
+
+This tool is intended for personal, interactive use only. Some features use browser automation to access functionality not available through official APIs. It is not designed for bulk automation, scraping, or commercial use. By using this tool, you accept responsibility for compliance with the terms of service of any platforms you interact with.
 
 ## Troubleshooting
 
 ### "Auth expired" or commands fail after a while
 
-LinkedIn tokens expire after 60 days. Re-authenticate:
+Tokens expire after 60 days. Re-authenticate:
 
 ```bash
-npx ts-node bin/linkedin.ts auth login
+link-pulse auth login
 ```
 
-### "No feed posts found — LinkedIn DOM may have changed"
+### "No feed posts found"
 
-LinkedIn occasionally changes their page structure. Open an issue or let the maintainer know.
+The platform occasionally changes their page structure. Open an issue or let the maintainer know.
 
 ### Browser doesn't open during login
-
-Make sure Playwright's Chromium is installed:
 
 ```bash
 npx playwright install chromium
 ```
-
-### Permission errors on macOS
-
-`keytar` needs access to the macOS keychain. You may see a system prompt asking to allow access — click "Allow".

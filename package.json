@@ -1,26 +1,35 @@
 {
-  "name": "linkedin-cli",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "link-pulse",
+  "version": "0.1.0",
+  "description": "Personal CLI for managing your professional network from the terminal",
+  "author": "Babajide Okusanya",
+  "license": "ISC",
+  "type": "commonjs",
+  "bin": {
+    "link-pulse": "./dist/bin/linkedin.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "ts-node bin/linkedin.ts",
     "start": "node dist/bin/linkedin.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "prepublishOnly": "tsc",
+    "postinstall": "npx playwright install chromium || true"
   },
-  "bin": {
-    "linkedin": "./dist/bin/linkedin.js"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "keywords": [
+    "cli",
+    "professional-network",
+    "claude-code",
+    "productivity"
+  ],
   "dependencies": {
-    "chalk": "^5.6.2",
     "commander": "^14.0.3",
     "keytar": "^7.9.0",
-    "open": "^11.0.0",
     "playwright": "^1.58.2"
   },
   "devDependencies": {
