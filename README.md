@@ -1,6 +1,6 @@
 # link-pulse
 
-A personal CLI for managing your LinkedIn from the terminal — check your feed, search posts, read and send messages, and publish updates. Built to work with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an AI-powered workflow.
+A personal CLI for managing your LinkedIn, WhatsApp, and Messenger from the terminal — check your feed, search posts, read and send messages, manage connections, and publish updates. Built to work with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an AI-powered workflow.
 
 ## Install
 
@@ -105,6 +105,36 @@ link-pulse post create --text "My post text here"          # Create a post
 link-pulse post comment <post-urn> --text "Great post!"    # Comment on a post
 ```
 
+### Notifications
+
+```bash
+link-pulse notifications             # Check your notifications
+link-pulse notifications --limit 10  # Limit number of notifications
+```
+
+### Connections
+
+```bash
+link-pulse connections               # List your connections
+link-pulse connections --limit 20    # Limit number of connections
+```
+
+### WhatsApp
+
+```bash
+link-pulse whatsapp list                                         # List recent chats
+link-pulse whatsapp read <chat-id>                               # Read a conversation
+link-pulse whatsapp send <chat-id> --message "Hey!"              # Send a message
+```
+
+### Messenger
+
+```bash
+link-pulse messenger list                                        # List recent chats
+link-pulse messenger read <chat-id>                              # Read a conversation
+link-pulse messenger send <chat-id> --message "Hey!"             # Send a message
+```
+
 ### Profile
 
 ```bash
@@ -126,7 +156,8 @@ link-pulse profile           # Show your cached profile
 
 - **Auth** uses OAuth 2.0 to establish a session
 - **Posting and commenting** use the official REST API
-- **Feed, search, and messages** use Playwright to interact with the platform on your behalf
+- **Feed, search, messages, notifications, and connections** use Playwright to interact with LinkedIn on your behalf
+- **WhatsApp and Messenger** use Playwright for browser-based messaging
 - Credentials are stored in your OS keychain (via `keytar`) — not in plaintext files
 
 ## Using with Claude Code
