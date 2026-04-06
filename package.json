@@ -6,7 +6,7 @@
   "license": "ISC",
   "type": "commonjs",
   "bin": {
-    "link-pulse": "./dist/bin/linkedin.js"
+    "link-pulse": "dist/bin/linkedin.js"
   },
   "files": [
     "dist/"

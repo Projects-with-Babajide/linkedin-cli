@@ -134,3 +134,19 @@ export async function loadCookies(): Promise<string | null> {
 export async function clearCookies(): Promise<void> {
   await deletePassword(SERVICE_NAME, ACCOUNT_COOKIES);
 }
+
+// WhatsApp-specific cookie storage (separate service to avoid conflicts with LinkedIn session)
+const WA_SERVICE_NAME = 'whatsapp-cli';
+const WA_ACCOUNT_COOKIES = 'browser-cookies';
+
+export async function saveWhatsAppCookies(state: string): Promise<void> {
+  await setPassword(WA_SERVICE_NAME, WA_ACCOUNT_COOKIES, state);
+}
+
+export async function loadWhatsAppCookies(): Promise<string | null> {
+  return getPassword(WA_SERVICE_NAME, WA_ACCOUNT_COOKIES);
+}
+
+export async function clearWhatsAppCookies(): Promise<void> {
+  await deletePassword(WA_SERVICE_NAME, WA_ACCOUNT_COOKIES);
+}

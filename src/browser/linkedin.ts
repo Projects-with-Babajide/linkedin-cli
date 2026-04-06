@@ -258,44 +258,81 @@ export async function startNewThread(recipientQuery: string, body: string): Prom
   const session = await createBrowserSession();
   try {
     await ensureLoggedIn(session.page);
-    await session.page.goto('https://www.linkedin.com/messaging/compose/', {
-      waitUntil: 'domcontentloaded',
-    });
-    await randomDelay();
 
-    // Type recipient name in search box
-    const recipientSelector = 'input[placeholder*="Type a name"], .msg-connections-typeahead__search-field';
-    await safeClick(session.page, recipientSelector);
-    await randomDelay(300, 600);
+    // If recipientQuery looks like a LinkedIn profile URL, navigate there and click Message
+    const isProfileUrl = recipientQuery.includes('linkedin.com/in/') || recipientQuery.startsWith('/in/');
+    if (isProfileUrl) {
+      const profileUrl = recipientQuery.startsWith('http') ? recipientQuery : `https://www.linkedin.com${recipientQuery}`;
+      await session.page.goto(profileUrl, { waitUntil: 'domcontentloaded' });
+      await randomDelay(3000, 4000);
 
-    for (const char of recipientQuery) {
-      await session.page.keyboard.type(char, { delay: Math.floor(Math.random() * 80 + 40) });
+      // Click the Message button on the profile via JS to bypass any overlays
+      const clicked = await session.page.evaluate(() => {
+        // Try anchor with messaging/compose href
+        const msgLink = document.querySelector('a[href*="/messaging/compose"]') as HTMLElement | null;
+        if (msgLink) { msgLink.click(); return 'link'; }
+        // Try button with "Message" text
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const msgBtn = buttons.find(b => b.textContent?.trim() === 'Message');
+        if (msgBtn) { msgBtn.click(); return 'button'; }
+        return null;
+      });
+      if (!clicked) {
+        throw new CliException('Could not find Message button on profile', ErrorCode.SELECTOR_ERROR);
+      }
+      await randomDelay(2000, 3000);
+    } else {
+      // Fall back to compose page with typeahead
+      await session.page.goto('https://www.linkedin.com/messaging/compose/', {
+        waitUntil: 'domcontentloaded',
+      });
+      await randomDelay(2000, 3000);
+
+      const recipientSelector = 'input[placeholder*="name"], input[placeholder*="Search"], .msg-connections-typeahead__search-field, [role="combobox"]';
+      await safeClick(session.page, recipientSelector);
+      await randomDelay(300, 600);
+
+      for (const char of recipientQuery) {
+        await session.page.keyboard.type(char, { delay: Math.floor(Math.random() * 80 + 40) });
+      }
+      await randomDelay(1500, 2500);
+
+      // Click first result in the typeahead dropdown
+      const resultSelector = 'li[class*="typeahead"], [role="option"], [role="listbox"] li, ul[class*="typeahead"] li';
+      await safeClick(session.page, resultSelector);
+      await randomDelay(500, 1000);
     }
 
-    await randomDelay(1000, 2000);
-
-    // Click first search result
-    const resultSelector =
-      '.msg-connections-typeahead__result-item, .basic-typeahead__triggered-content li:first-child';
-    await safeClick(session.page, resultSelector);
-    await randomDelay(500, 1000);
-
-    // Type message
+    // Type message in compose box
     const composeSelector =
-      '.msg-form__contenteditable, [data-placeholder="Write a message…"], [aria-label="Write a message"]';
+      '.msg-form__contenteditable, [role="textbox"], [contenteditable="true"], [aria-label*="message" i], [aria-label*="Message" i]';
     await safeClick(session.page, composeSelector);
+    await randomDelay(500, 800);
 
-    for (const char of body) {
-      await session.page.keyboard.type(char, { delay: Math.floor(Math.random() * 80 + 40) });
+    // Split on newlines and use Shift+Enter for line breaks
+    // (LinkedIn uses plain Enter to send, so newlines must be Shift+Enter)
+    const lines = body.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      for (const char of lines[i]) {
+        await session.page.keyboard.type(char, { delay: Math.floor(Math.random() * 60 + 30) });
+      }
+      if (i < lines.length - 1) {
+        await session.page.keyboard.press('Shift+Enter');
+        await randomDelay(50, 100);
+      }
     }
 
-    await randomDelay(500, 1000);
+    await randomDelay(800, 1200);
 
-    const sendSelector = '.msg-form__send-button, button[type="submit"]';
-    await safeClick(session.page, sendSelector);
+    // Send — try button first, fall back to Enter
+    const sendBtn = await session.page.$('.msg-form__send-button, button[type="submit"][aria-label*="Send" i]');
+    if (sendBtn) {
+      await sendBtn.click();
+    } else {
+      await session.page.keyboard.press('Enter');
+    }
     await randomDelay(2000, 3000);
 
-    // Extract thread ID from URL
     const url = session.page.url();
     const match = url.match(/\/messaging\/thread\/([^/]+)/);
     return match ? match[1] : url;
@@ -715,44 +752,292 @@ export async function searchPeople(query: string, limit: number): Promise<Person
     );
     await randomDelay();
 
+    // Wait for profile links to appear
     try {
-      await session.page.waitForSelector(
-        '.reusable-search__result-container, .search-results__list',
-        { timeout: 15000 }
-      );
+      await session.page.waitForSelector('a[href*="/in/"]', { timeout: 15000 });
     } catch {
       throw new CliException('People search did not load', ErrorCode.NETWORK_ERROR);
     }
+    await randomDelay(1500, 2000);
 
     await checkForBlock(session.page);
 
     const results = await session.page.evaluate(() => {
-      const items = document.querySelectorAll('.reusable-search__result-container, .search-results__list > li');
-      return Array.from(items).map((item) => {
-        const nameEl = item.querySelector(
-          '.entity-result__title-text a span[aria-hidden="true"], .actor-name'
-        );
-        const name = nameEl?.textContent?.trim() ?? '';
+      // LinkedIn 2025: profile card links have multiline innerText with name, degree, headline, location
+      // Pattern: "Name \n • Degree\n\nHeadline\n\nLocation\n\nAction"
+      const profileLinks = Array.from(
+        document.querySelectorAll('a[href*="linkedin.com/in/"], a[href^="/in/"]')
+      ) as HTMLAnchorElement[];
 
-        const headlineEl = item.querySelector(
-          '.entity-result__primary-subtitle, .subline-level-1'
-        );
-        const headline = headlineEl?.textContent?.trim() ?? '';
+      const seen = new Set<string>();
+      const items: Array<{ name: string; headline: string; profileUrl: string; connectionDegree: string }> = [];
 
-        const linkEl = item.querySelector('a.app-aware-link[href*="/in/"]') as HTMLAnchorElement;
-        const profileUrl = linkEl?.href ?? '';
+      for (const link of profileLinks) {
+        const href = link.href;
+        if (seen.has(href)) continue;
 
-        const degreeEl = item.querySelector(
-          '.dist-value, .entity-result__badge-text'
-        );
-        const connectionDegree = degreeEl?.textContent?.trim() ?? '';
+        const raw = (link as HTMLElement).innerText ?? '';
+        // Card links have multi-line content; skip short ones (nav, name-only duplicates)
+        if (!raw.includes('\n')) continue;
 
-        return { name, headline, profileUrl, connectionDegree };
-      }).filter((r) => r.name);
+        seen.add(href);
+
+        const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length === 0) continue;
+
+        // First line is the name (may include degree suffix like " • 2nd")
+        const firstLine = lines[0];
+        const degreeMatch = firstLine.match(/[•·]\s*(1st|2nd|3rd\+?)$/);
+        const connectionDegree = degreeMatch?.[1] ?? '';
+        const name = firstLine.replace(/\s*[•·]\s*(1st|2nd|3rd\+?)\s*$/, '').trim();
+
+        // Second meaningful line is the headline (skip degree-only lines)
+        const headline = lines.find(l => l !== name && !/^[•·]?\s*(1st|2nd|3rd\+?)$/.test(l)) ?? '';
+
+        if (name) {
+          items.push({ name, headline, profileUrl: href, connectionDegree });
+        }
+      }
+
+      return items;
     });
 
     await setCached(cacheKey, results.slice(0, limit));
     return results.slice(0, limit);
+  } finally {
+    await closeBrowserSession(session);
+  }
+}
+
+// ─── Connections ─────────────────────────────────────────────────────────────
+
+export interface Connection {
+  name: string;
+  headline: string;
+  profileUrl: string;
+  connectedAt: string;
+}
+
+export async function scrapeRecentConnections(limit: number): Promise<Connection[]> {
+  const cacheKey = `recent-connections-${limit}`;
+  const cached = await getCached<Connection[]>(cacheKey, 30 * 60 * 1000);
+  if (cached) return cached;
+
+  const session = await createBrowserSession();
+  try {
+    await ensureLoggedIn(session.page);
+    await session.page.goto(
+      'https://www.linkedin.com/mynetwork/invite-connect/connections/',
+      { waitUntil: 'load' }
+    );
+    await randomDelay(3000, 4000);
+
+    // Wait for profile links to appear (LinkedIn uses hashed CSS classes, so match on href)
+    try {
+      await session.page.waitForSelector('a[href*="/in/"]', { timeout: 15000 });
+    } catch {
+      await checkForBlock(session.page);
+      throw new CliException('Connections page did not load', ErrorCode.NETWORK_ERROR);
+    }
+
+    await checkForBlock(session.page);
+
+    // Click "Load more" or scroll to get enough connections
+    let previousCount = 0;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const currentCount = await session.page.evaluate(
+        () => document.querySelectorAll('a[href*="/in/"]').length
+      );
+      if (currentCount >= limit * 2 || currentCount === previousCount) break;
+      previousCount = currentCount;
+
+      // Try clicking a "Load more" button first, then scroll
+      const clicked = await session.page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button')).find(
+          (b) => b.textContent?.trim().toLowerCase().includes('load more')
+        );
+        if (btn) { btn.click(); return true; }
+        return false;
+      });
+      if (!clicked) {
+        await session.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      }
+      await randomDelay(1500, 2500);
+    }
+
+    // Parse connections from the page body text
+    // LinkedIn renders: "Name\nHeadline\nConnected on <date>\nMessage" per connection
+    const connections = await session.page.evaluate(() => {
+      const main = document.querySelector('main') || document.body;
+      const text = (main as HTMLElement).innerText ?? '';
+      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+
+      // Collect all profile links with text content (name + headline)
+      const profileLinks = Array.from(
+        document.querySelectorAll('a[href*="/in/"]')
+      ) as HTMLAnchorElement[];
+
+      const seen = new Set<string>();
+      const results: Array<{ name: string; headline: string; profileUrl: string; connectedAt: string }> = [];
+
+      for (const link of profileLinks) {
+        const href = link.href;
+        if (seen.has(href)) continue;
+
+        const raw = (link as HTMLElement).innerText ?? '';
+        // Profile card links have "Name\nHeadline"; skip empty or single-word links (avatar links)
+        if (!raw.includes('\n')) continue;
+        seen.add(href);
+
+        const parts = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+        if (parts.length < 2) continue;
+
+        const name = parts[0];
+        const headline = parts.slice(1).join(' ');
+
+        // Find "Connected on ..." in the page text near this person's name
+        const connIdx = lines.findIndex(
+          (l) => l.startsWith('Connected on') &&
+            lines.indexOf(name) !== -1 &&
+            lines.indexOf(name) < lines.indexOf(l)
+        );
+        const connectedAt = connIdx !== -1
+          ? lines[connIdx].replace('Connected on ', '')
+          : '';
+
+        results.push({ name, headline, profileUrl: href, connectedAt });
+      }
+
+      return results;
+    });
+
+    await setCached(cacheKey, connections.slice(0, limit));
+    return connections.slice(0, limit);
+  } finally {
+    await closeBrowserSession(session);
+  }
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+export interface Notification {
+  id: string;
+  type: string;
+  actor: string;
+  text: string;
+  timestamp: string;
+  url: string;
+  unread: boolean;
+}
+
+export async function scrapeNotifications(limit: number, unreadOnly: boolean): Promise<Notification[]> {
+  const session = await createBrowserSession();
+  try {
+    await ensureLoggedIn(session.page);
+    await session.page.goto('https://www.linkedin.com/notifications/', { waitUntil: 'load' });
+    await randomDelay(3000, 4000);
+    await checkForBlock(session.page);
+
+    try {
+      await session.page.waitForSelector(
+        'section.nt-card-list, [data-finite-scroll-hotkey-item], .notification-item, [class*="nt-card"]',
+        { timeout: 15000 }
+      );
+    } catch {
+      await checkForBlock(session.page);
+    }
+
+    const results = await session.page.evaluate((unreadOnly: boolean) => {
+      const notifications: Array<{
+        id: string;
+        type: string;
+        actor: string;
+        text: string;
+        timestamp: string;
+        url: string;
+        unread: boolean;
+      }> = [];
+
+      // LinkedIn 2025+ notifications DOM: cards inside section.nt-card-list
+      const cards = Array.from(document.querySelectorAll(
+        '[data-finite-scroll-hotkey-item], .nt-card-list__item, section.nt-card-list > *, [class*="notification-card"], [class*="nt-card"]'
+      ));
+
+      // Fallback to any list items in the notifications feed
+      const items = cards.length > 0 ? cards : Array.from(document.querySelectorAll('li, article')).filter(el => {
+        const text = el.textContent ?? '';
+        return text.length > 10 && el.closest('[role="feed"], [role="list"], main');
+      });
+
+      items.forEach((item, idx) => {
+        // Unread detection: look for unread indicator classes or aria
+        const unread =
+          item.classList.contains('nt-card--unread') ||
+          item.classList.contains('unread') ||
+          !!item.querySelector('[class*="unread"], .notification-badge') ||
+          item.getAttribute('data-is-read') === 'false';
+
+        if (unreadOnly && !unread) return;
+
+        // Actor name — usually first bold/strong text or a profile link
+        const actorEl = item.querySelector('a[href*="/in/"] span[aria-hidden="true"], a[href*="/company/"] span[aria-hidden="true"], strong, b, .nt-card__actor-name, [class*="actor-name"]');
+        const actor = actorEl?.textContent?.trim() ?? '';
+
+        // Full notification text — prefer visible text, exclude sr-only / visually-hidden elements
+        // Clone the item and strip hidden elements before reading text
+        const clone = item.cloneNode(true) as Element;
+        clone.querySelectorAll('.visually-hidden, .sr-only, [aria-hidden="true"], time, [class*="visually-hidden"]').forEach(el => el.remove());
+        let text = clone.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+        // Trim to a reasonable length
+        text = text.slice(0, 300);
+
+        // Timestamp — look for <time> or relative time text
+        const timeEl = item.querySelector('time, [class*="time"], [class*="timestamp"]');
+        const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
+
+        // URL — first link in the card
+        const linkEl = item.querySelector('a[href]') as HTMLAnchorElement | null;
+        const url = linkEl?.href ?? '';
+
+        // Type inference from text/icons
+        let type = 'other';
+        const lowerText = text.toLowerCase();
+        if (lowerText.includes('like') || lowerText.includes('reaction') || lowerText.includes('react')) type = 'reaction';
+        else if (lowerText.includes('comment')) type = 'comment';
+        else if (lowerText.includes('connect') || lowerText.includes('invitation') || lowerText.includes('accepted')) type = 'connection';
+        else if (lowerText.includes('mention')) type = 'mention';
+        else if (lowerText.includes('repost') || lowerText.includes('shared your')) type = 'repost';
+        else if (lowerText.includes('follow')) type = 'follow';
+        else if (lowerText.includes('job') || lowerText.includes('hired') || lowerText.includes('work anniversar') || lowerText.includes('new role')) type = 'career';
+        else if (lowerText.includes('birthday') || lowerText.includes('anniversar')) type = 'milestone';
+        else if (lowerText.includes('view') || lowerText.includes('profile')) type = 'profile_view';
+
+        if (text.length > 5) {
+          notifications.push({
+            id: `notif-${idx}`,
+            type,
+            actor,
+            text,
+            timestamp,
+            url,
+            unread,
+          });
+        }
+      });
+
+      return notifications;
+    }, unreadOnly);
+
+    // Deduplicate by text+actor
+    const seen = new Set<string>();
+    const deduped = results.filter((n) => {
+      const key = `${n.actor}:${n.text.slice(0, 80)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return deduped.slice(0, limit);
   } finally {
     await closeBrowserSession(session);
   }

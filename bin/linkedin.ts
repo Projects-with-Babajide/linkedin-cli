@@ -9,6 +9,10 @@ import { registerMessagesCommands } from '../src/commands/messages';
 import { registerFeedCommand } from '../src/commands/feed';
 import { registerSearchCommands } from '../src/commands/search';
 import { registerPostCommands } from '../src/commands/post';
+import { registerNotificationsCommand } from '../src/commands/notifications';
+import { registerWhatsAppCommands } from '../src/commands/whatsapp';
+import { registerMessengerCommands } from '../src/commands/messenger';
+import { registerConnectionsCommands } from '../src/commands/connections';
 
 checkNotRoot();
 
@@ -48,5 +52,9 @@ registerMessagesCommands(program);
 registerFeedCommand(program);
 registerSearchCommands(program);
 registerPostCommands(program);
+registerNotificationsCommand(program);
+registerWhatsAppCommands(program);
+registerMessengerCommands(program);
+registerConnectionsCommands(program);
 
 program.parseAsync(process.argv);
