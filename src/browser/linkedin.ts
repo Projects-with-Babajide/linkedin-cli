@@ -2,6 +2,7 @@ import { createBrowserSession, closeBrowserSession } from './session';
 import { randomDelay, safeClick, checkForBlock, ensureLoggedIn } from './helpers';
 import { CliException, ErrorCode } from '../utils/errors';
 import { getCached, setCached } from '../storage/cache';
+import { debug } from '../utils/logger';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,51 +40,187 @@ export async function scrapeMessageThreads(limit: number): Promise<MessageThread
 
     await checkForBlock(session.page);
 
-    // Extract metadata from each conversation list item, then click to get thread ID
-    const items = await session.page.$$('li.msg-conversation-listitem');
-    const threads: MessageThread[] = [];
+    // LinkedIn no longer renders an anchor with an href on conversation items
+    // (the "link" is a <div tabindex="0">). The only way to get a thread ID is
+    // to click and read the resulting URL. We harden this by:
+    //   * Re-querying ElementHandles fresh every iteration (never reuse stale).
+    //   * Deduping by a participant+snippet+timestamp signature so we don't
+    //     re-click items we already resolved.
+    //   * Waiting for the URL to actually change to a new /messaging/thread/<id>/
+    //     before reading it (fixes the cascade where a no-op click left
+    //     page.url() pointing at the previous thread).
+    //   * Special-casing the active item — its URL is already in the address
+    //     bar after LinkedIn's auto-nav on page load, so we don't need to click.
+    const map = new Map<string, MessageThread>();
+    const processed = new Set<string>();
+    let staleScrolls = 0;
 
-    for (let i = 0; i < Math.min(items.length, limit); i++) {
-      const meta = await items[i].evaluate((el: Element) => {
-        const nameEl = el.querySelector(
-          '.msg-conversation-listitem__participant-names, .msg-conversation-card__participant-names, h3'
-        );
-        const participantName = nameEl?.textContent?.trim() ?? 'Unknown';
+    type ItemSig = {
+      idx: number;
+      participantName: string;
+      snippet: string;
+      timestamp: string;
+      unread: boolean;
+      isActive: boolean;
+    };
 
-        const snippetEl = el.querySelector(
-          '.msg-conversation-card__message-snippet, .msg-conversation-listitem__message-snippet, p'
-        );
-        const snippet = snippetEl?.textContent?.trim() ?? '';
+    const readItemSigs = (): Promise<ItemSig[]> =>
+      session.page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll('li.msg-conversation-listitem'));
+        return items.map((el, idx) => {
+          const nameEl = el.querySelector(
+            '.msg-conversation-listitem__participant-names, .msg-conversation-card__participant-names, h3'
+          );
+          const participantName = nameEl?.textContent?.trim() ?? 'Unknown';
 
-        const timeEl = el.querySelector('time, .msg-conversation-listitem__time-stamp');
-        const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
+          const snippetEl = el.querySelector(
+            '.msg-conversation-card__message-snippet, .msg-conversation-listitem__message-snippet, p'
+          );
+          const snippet = snippetEl?.textContent?.trim() ?? '';
 
-        const unread =
-          el.classList.contains('msg-conversation-listitem--unread') ||
-          !!el.querySelector('.msg-conversation-listitem__unread-count, .notification-badge');
+          const timeEl = el.querySelector('time, .msg-conversation-listitem__time-stamp');
+          const timestamp = timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? '';
 
-        return { participantName, snippet, timestamp, unread };
+          const unread =
+            el.classList.contains('msg-conversation-listitem--unread') ||
+            !!el.querySelector('.msg-conversation-listitem__unread-count, .notification-badge');
+
+          const linkInner = el.querySelector('.msg-conversation-listitem__link');
+          const isActive =
+            !!linkInner?.classList.contains('msg-conversations-container__convo-item-link--active') ||
+            !!el.querySelector('.msg-conversations-container__convo-item-link--active');
+
+          return { idx, participantName, snippet, timestamp, unread, isActive };
+        });
       });
 
-      // Click the conversation to navigate to it and capture the thread ID from the URL
-      const link = await items[i].$('.msg-conversation-listitem__link');
-      if (link) {
-        await link.evaluate((el: Element) => (el as HTMLElement).click());
-      } else {
-        await items[i].evaluate((el: Element) => (el as HTMLElement).click());
+    const sigKey = (s: ItemSig): string =>
+      `${s.participantName}|${s.snippet.slice(0, 60)}|${s.timestamp}`;
+
+    while (map.size < limit && staleScrolls < 2) {
+      const sigs = await readItemSigs();
+      debug(`messages: scanning ${sigs.length} rendered items, map.size=${map.size}`);
+      const sizeBefore = map.size;
+
+      for (const s of sigs) {
+        if (map.size >= limit) break;
+        const key = sigKey(s);
+        if (processed.has(key)) continue;
+
+        // Active item: URL is already a thread URL after LinkedIn's auto-nav.
+        // No click needed — just read it.
+        if (s.isActive) {
+          const url = session.page.url();
+          const m = url.match(/\/messaging\/thread\/([^/?]+)/);
+          if (m) {
+            const id = m[1];
+            processed.add(key);
+            if (!map.has(id)) {
+              map.set(id, {
+                id,
+                participantName: s.participantName,
+                snippet: s.snippet,
+                timestamp: s.timestamp,
+                unread: s.unread,
+              });
+            }
+            continue;
+          }
+        }
+
+        // Click the item: re-query handles right before clicking so we never
+        // hold a stale ElementHandle across a click.
+        const before = session.page.url();
+        const items = await session.page.$$('li.msg-conversation-listitem');
+        if (s.idx >= items.length) {
+          // List shrank between read and click — skip; we'll re-scan next loop.
+          continue;
+        }
+
+        try {
+          await items[s.idx].evaluate((el: Element) => {
+            const link = el.querySelector('.msg-conversation-listitem__link') as HTMLElement | null;
+            (link ?? (el as HTMLElement)).click();
+          });
+        } catch {
+          processed.add(key);
+          continue;
+        }
+
+        // Wait for the URL to settle on a NEW thread URL. If it doesn't change
+        // within 4s, the click no-op'd or routed elsewhere — skip.
+        try {
+          await session.page.waitForFunction(
+            (prev: string) => {
+              const cur = location.href;
+              return cur !== prev && /\/messaging\/thread\/[^/?]+/.test(cur);
+            },
+            before,
+            { timeout: 4000 }
+          );
+        } catch {
+          debug(`messages: click on idx=${s.idx} (${s.participantName}) did not change URL — skipping`);
+          processed.add(key);
+          continue;
+        }
+
+        const url = session.page.url();
+        const m = url.match(/\/messaging\/thread\/([^/?]+)/);
+        const id = m ? m[1] : '';
+        processed.add(key);
+
+        if (id && !map.has(id)) {
+          map.set(id, {
+            id,
+            participantName: s.participantName,
+            snippet: s.snippet,
+            timestamp: s.timestamp,
+            unread: s.unread,
+          });
+        }
+
+        // Small pacing delay between clicks
+        await randomDelay(150, 350);
       }
+
+      if (map.size >= limit) break;
+
+      // Scroll the inner conversation list container to lazy-load more.
+      await session.page.evaluate(() => {
+        const candidates = [
+          '.msg-conversations-container__conversations-list',
+          '.msg-conversations-container__list-wrapper',
+          '.scaffold-finite-scroll__content',
+        ];
+        let target: HTMLElement | null = null;
+        for (const sel of candidates) {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (el && el.scrollHeight > el.clientHeight) {
+            target = el;
+            break;
+          }
+        }
+        if (!target) {
+          const item = document.querySelector('li.msg-conversation-listitem') as HTMLElement | null;
+          let cursor: HTMLElement | null = item?.parentElement ?? null;
+          while (cursor) {
+            const style = getComputedStyle(cursor);
+            const scrollable =
+              cursor.scrollHeight > cursor.clientHeight &&
+              (style.overflowY === 'auto' || style.overflowY === 'scroll');
+            if (scrollable) { target = cursor; break; }
+            cursor = cursor.parentElement;
+          }
+        }
+        if (target) target.scrollTop = target.scrollHeight;
+      });
       await randomDelay(800, 1200);
 
-      const url = session.page.url();
-      const idMatch = url.match(/\/messaging\/thread\/([^/]+)/);
-      const id = idMatch ? idMatch[1] : '';
-
-      if (id) {
-        threads.push({ id, ...meta });
-      }
+      if (map.size === sizeBefore) staleScrolls++;
+      else staleScrolls = 0;
     }
 
-    return threads;
+    return Array.from(map.values()).slice(0, limit);
   } finally {
     await closeBrowserSession(session);
   }
