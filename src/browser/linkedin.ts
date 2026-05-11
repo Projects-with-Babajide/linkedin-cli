@@ -396,53 +396,63 @@ export async function startNewThread(recipientQuery: string, body: string): Prom
   try {
     await ensureLoggedIn(session.page);
 
-    // If recipientQuery looks like a LinkedIn profile URL, navigate there and click Message
+    // Always route through /messaging/compose/ + typeahead — the known-good
+    // drawer. The previous "navigate to profile and click Message" path
+    // depended on layout variants AND landed typing into ambient profile-page
+    // contenteditables (global search, post composer). When a profile URL is
+    // passed, we first scrape the visible name from the profile so we can
+    // feed something the typeahead reliably resolves, then move to compose.
     const isProfileUrl = recipientQuery.includes('linkedin.com/in/') || recipientQuery.startsWith('/in/');
+    let typeaheadQuery = recipientQuery;
+
     if (isProfileUrl) {
-      const profileUrl = recipientQuery.startsWith('http') ? recipientQuery : `https://www.linkedin.com${recipientQuery}`;
+      const profileUrl = recipientQuery.startsWith('http')
+        ? recipientQuery
+        : `https://www.linkedin.com${recipientQuery}`;
       await session.page.goto(profileUrl, { waitUntil: 'domcontentloaded' });
-      await randomDelay(3000, 4000);
-
-      // Click the Message button on the profile via JS to bypass any overlays
-      const clicked = await session.page.evaluate(() => {
-        // Try anchor with messaging/compose href
-        const msgLink = document.querySelector('a[href*="/messaging/compose"]') as HTMLElement | null;
-        if (msgLink) { msgLink.click(); return 'link'; }
-        // Try button with "Message" text
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const msgBtn = buttons.find(b => b.textContent?.trim() === 'Message');
-        if (msgBtn) { msgBtn.click(); return 'button'; }
-        return null;
-      });
-      if (!clicked) {
-        throw new CliException('Could not find Message button on profile', ErrorCode.SELECTOR_ERROR);
-      }
-      await randomDelay(2000, 3000);
-    } else {
-      // Fall back to compose page with typeahead
-      await session.page.goto('https://www.linkedin.com/messaging/compose/', {
-        waitUntil: 'domcontentloaded',
-      });
       await randomDelay(2000, 3000);
 
-      const recipientSelector = 'input[placeholder*="name"], input[placeholder*="Search"], .msg-connections-typeahead__search-field, [role="combobox"]';
-      await safeClick(session.page, recipientSelector);
-      await randomDelay(300, 600);
+      const name = await session.page.evaluate(() => {
+        // The profile name is the page's <h1> on /in/<slug>/.
+        const h1 = document.querySelector('main h1, h1');
+        return h1?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      });
 
-      for (const char of recipientQuery) {
-        await session.page.keyboard.type(char, { delay: Math.floor(Math.random() * 80 + 40) });
+      if (!name) {
+        throw new CliException(
+          'Could not extract name from profile page — profile may not exist or did not load',
+          ErrorCode.SELECTOR_ERROR
+        );
       }
-      await randomDelay(1500, 2500);
-
-      // Click first result in the typeahead dropdown
-      const resultSelector = 'li[class*="typeahead"], [role="option"], [role="listbox"] li, ul[class*="typeahead"] li';
-      await safeClick(session.page, resultSelector);
-      await randomDelay(500, 1000);
+      typeaheadQuery = name;
+      debug(`startNewThread: profile URL → typeahead query "${name}"`);
     }
 
-    // Type message in compose box
-    const composeSelector =
-      '.msg-form__contenteditable, [role="textbox"], [contenteditable="true"], [aria-label*="message" i], [aria-label*="Message" i]';
+    await session.page.goto('https://www.linkedin.com/messaging/compose/', {
+      waitUntil: 'domcontentloaded',
+    });
+    await randomDelay(2000, 3000);
+
+    const recipientSelector =
+      'input[placeholder*="name"], input[placeholder*="Search"], .msg-connections-typeahead__search-field, [role="combobox"]';
+    await safeClick(session.page, recipientSelector);
+    await randomDelay(300, 600);
+
+    for (const char of typeaheadQuery) {
+      await session.page.keyboard.type(char, { delay: Math.floor(Math.random() * 80 + 40) });
+    }
+    await randomDelay(1500, 2500);
+
+    // Click first result in the typeahead dropdown
+    const resultSelector =
+      'li[class*="typeahead"], [role="option"], [role="listbox"] li, ul[class*="typeahead"] li';
+    await safeClick(session.page, resultSelector);
+    await randomDelay(500, 1000);
+
+    // Compose box: only the dedicated message-form selector. Dropping the
+    // generic [role="textbox"] / [contenteditable="true"] fallbacks — those
+    // matched ambient textboxes on profile pages and caused silent failures.
+    const composeSelector = '.msg-form__contenteditable';
     await safeClick(session.page, composeSelector);
     await randomDelay(500, 800);
 
