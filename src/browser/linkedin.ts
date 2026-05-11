@@ -461,6 +461,33 @@ export async function startNewThread(recipientQuery: string, body: string): Prom
 
     await randomDelay(800, 1200);
 
+    // Pre-Send verification: confirm the compose box actually holds the text
+    // we just typed. If it's empty or doesn't contain the body prefix, the
+    // typing happened in the wrong element — abort before pressing Send/Enter.
+    const bodyStripped = body.replace(/\s+/g, '');
+    const probePrefix = bodyStripped.slice(0, Math.min(30, bodyStripped.length));
+    const probe = await session.page.evaluate((sel: string) => {
+      const els = Array.from(document.querySelectorAll(sel));
+      const composeCount = els.length;
+      const focused = els.find((el) => el === document.activeElement) ?? els[0];
+      const text = (focused?.textContent ?? '').replace(/\s+/g, '');
+      const sendBtns = document.querySelectorAll(
+        '.msg-form__send-button, button[type="submit"][aria-label*="Send" i]'
+      ).length;
+      return { composeCount, text, sendBtns };
+    }, composeSelector);
+
+    debug(
+      `startNewThread: pre-send compose=${probe.composeCount} sendBtns=${probe.sendBtns} contentLen=${probe.text.length} expectedPrefix="${probePrefix.slice(0, 20)}…"`
+    );
+
+    if (!probe.text || !probe.text.includes(probePrefix)) {
+      throw new CliException(
+        `Compose box did not capture message body (got ${probe.text.length} chars, expected to contain "${probePrefix.slice(0, 20)}…"). Send aborted to avoid silent failure.`,
+        ErrorCode.SELECTOR_ERROR
+      );
+    }
+
     // Send — try button first, fall back to Enter
     const sendBtn = await session.page.$('.msg-form__send-button, button[type="submit"][aria-label*="Send" i]');
     if (sendBtn) {
@@ -468,11 +495,50 @@ export async function startNewThread(recipientQuery: string, body: string): Prom
     } else {
       await session.page.keyboard.press('Enter');
     }
-    await randomDelay(2000, 3000);
+
+    // Post-Send verification: wait up to 5s for EITHER the URL to change to a
+    // real /messaging/thread/<id>/ URL OR a sent-message bubble carrying our
+    // body to appear in the DOM. If neither, the send did not complete — throw.
+    let verified = false;
+    try {
+      await session.page.waitForFunction(
+        (prefix: string) => {
+          if (/\/messaging\/thread\/[^/?]+/.test(location.href)) return true;
+          const bubbles = Array.from(
+            document.querySelectorAll(
+              '.msg-s-event-listitem__body, .msg-s-message-list__event, [class*="event-listitem__body"]'
+            )
+          );
+          for (const b of bubbles) {
+            const txt = (b.textContent ?? '').replace(/\s+/g, '');
+            if (txt.includes(prefix)) return true;
+          }
+          return false;
+        },
+        probePrefix,
+        { timeout: 5000 }
+      );
+      verified = true;
+    } catch {
+      // fall through to throw below
+    }
+
+    if (!verified) {
+      debug(
+        `startNewThread: post-send verification failed — url=${session.page.url()} no matching bubble within 5s`
+      );
+      throw new CliException(
+        'Send did not complete — no thread URL appeared and no sent-message bubble was found within 5s. LinkedIn may have blocked the action or the compose drawer changed.',
+        ErrorCode.NETWORK_ERROR
+      );
+    }
 
     const url = session.page.url();
-    const match = url.match(/\/messaging\/thread\/([^/]+)/);
-    return match ? match[1] : url;
+    const match = url.match(/\/messaging\/thread\/([^/?]+)/);
+    // Sent successfully. If LinkedIn used the overlay drawer the URL won't
+    // contain a thread URN — return empty string so the caller can surface
+    // "sent but URN unknown" rather than echoing the input URL.
+    return match ? match[1] : '';
   } finally {
     await closeBrowserSession(session);
   }
